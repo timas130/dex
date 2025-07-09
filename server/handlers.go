@@ -361,51 +361,62 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
+	var username string
+	var password string
+	var credentialsOk bool
+
+	username, password, credentialsOk = r.BasicAuth()
+
+	if r.Method == http.MethodPost {
+		username = r.FormValue("login")
+		password = r.FormValue("password")
+		credentialsOk = true
+	} else if r.Method != http.MethodGet {
+		s.renderError(r, w, http.StatusBadRequest, "Unsupported request method.")
+		return
+	}
+
+	if !credentialsOk {
 		if err := s.templates.password(r, w, r.URL.String(), "", usernamePrompt(pwConn), false, backLink); err != nil {
 			s.logger.ErrorContext(r.Context(), "server template error", "err", err)
 		}
-	case http.MethodPost:
-		username := r.FormValue("login")
-		password := r.FormValue("password")
-		scopes := parseScopes(authReq.Scopes)
+		return
+	}
 
-		identity, ok, err := pwConn.Login(r.Context(), scopes, username, password)
-		if err != nil {
-			s.logger.ErrorContext(r.Context(), "failed to login user", "err", err)
-			s.renderError(r, w, http.StatusInternalServerError, fmt.Sprintf("Login error: %v", err))
-			return
+	scopes := parseScopes(authReq.Scopes)
+
+	identity, ok, err := pwConn.Login(r.Context(), scopes, username, password)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "failed to login user", "err", err)
+		s.renderError(r, w, http.StatusInternalServerError, fmt.Sprintf("Login error: %v", err))
+		return
+	}
+	if !ok {
+		if err := s.templates.password(r, w, r.URL.String(), username, usernamePrompt(pwConn), true, backLink); err != nil {
+			s.logger.ErrorContext(r.Context(), "server template error", "err", err)
 		}
-		if !ok {
-			if err := s.templates.password(r, w, r.URL.String(), username, usernamePrompt(pwConn), true, backLink); err != nil {
-				s.logger.ErrorContext(r.Context(), "server template error", "err", err)
-			}
-			s.logger.ErrorContext(r.Context(), "failed login attempt: Invalid credentials.", "user", username)
-			return
-		}
-		redirectURL, canSkipApproval, err := s.finalizeLogin(r.Context(), identity, authReq, conn.Connector)
+		s.logger.ErrorContext(r.Context(), "failed login attempt: Invalid credentials.", "user", username)
+		return
+	}
+	redirectURL, canSkipApproval, err := s.finalizeLogin(r.Context(), identity, authReq, conn.Connector)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "failed to finalize login", "err", err)
+		s.renderError(r, w, http.StatusInternalServerError, "Login error.")
+		return
+	}
+
+	if canSkipApproval {
+		authReq, err = s.storage.GetAuthRequest(ctx, authReq.ID)
 		if err != nil {
-			s.logger.ErrorContext(r.Context(), "failed to finalize login", "err", err)
+			s.logger.ErrorContext(r.Context(), "failed to get finalized auth request", "err", err)
 			s.renderError(r, w, http.StatusInternalServerError, "Login error.")
 			return
 		}
-
-		if canSkipApproval {
-			authReq, err = s.storage.GetAuthRequest(ctx, authReq.ID)
-			if err != nil {
-				s.logger.ErrorContext(r.Context(), "failed to get finalized auth request", "err", err)
-				s.renderError(r, w, http.StatusInternalServerError, "Login error.")
-				return
-			}
-			s.sendCodeResponse(w, r, authReq)
-			return
-		}
-
-		http.Redirect(w, r, redirectURL, http.StatusSeeOther)
-	default:
-		s.renderError(r, w, http.StatusBadRequest, "Unsupported request method.")
+		s.sendCodeResponse(w, r, authReq)
+		return
 	}
+
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }
 
 func (s *Server) handleConnectorCallback(w http.ResponseWriter, r *http.Request) {
